@@ -22,7 +22,9 @@
     <div class="container">
         <h2>Authentication</h2>
         <div id="auth-section">
-            <button onclick="login()">Login with GitHub</button>
+            <button onclick="login('github')">Login with GitHub</button>
+            <button onclick="login('google')" style="background: #db4437;">Login with Google</button>
+            <button onclick="login('line')" style="background: #00c300;">Login with Line</button>
         </div>
         <div id="user-info" class="user-info" style="display: none;"></div>
     </div>
@@ -62,8 +64,8 @@
             }
         }
 
-        function login() {
-            window.location.href = 'http://localhost:8081/auth/login';
+        function login(provider = 'github') {
+            window.location.href = `http://localhost:8081/auth/login/${provider}`;
         }
 
         function logout() {
