@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gateway Service Demo</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { background: #f5f5f5; padding: 20px; border-radius: 8px; margin: 10px 0; }
+        button { background: #0366d6; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; margin: 5px; }
+        button:hover { background: #0256cc; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        .response { background: #fff; border: 1px solid #ddd; padding: 10px; margin: 10px 0; border-radius: 4px; white-space: pre-wrap; }
+        .user-info { background: #e6f3ff; padding: 10px; border-radius: 4px; margin: 10px 0; }
+        .error { background: #ffe6e6; color: #d73a49; }
+        .success { background: #e6ffe6; color: #28a745; }
+    </style>
+</head>
+<body>
+    <h1>Gateway Service Demo</h1>
+    
+    <div class="container">
+        <h2>Authentication</h2>
+        <div id="auth-section">
+            <button onclick="login()">Login with GitHub</button>
+        </div>
+        <div id="user-info" class="user-info" style="display: none;"></div>
+    </div>
+
+    <div class="container">
+        <h2>API Demo</h2>
+        <button onclick="callPublicAPI()" disabled id="public-btn">Call Public API</button>
+        <button onclick="callPrivateAPI()" disabled id="private-btn">Call Private API</button>
+        <button onclick="callUserAPI()" disabled id="user-btn">Call User API</button>
+        <button onclick="logout()" disabled id="logout-btn">Logout</button>
+        
+        <div id="response" class="response"></div>
+    </div>
+
+    <script>
+        let token = localStorage.getItem('token');
+        let user = JSON.parse(localStorage.getItem('user') || 'null');
+
+        function updateUI() {
+            const authSection = document.getElementById('auth-section');
+            const userInfo = document.getElementById('user-info');
+            
+            // Always enable all API buttons to show auth differences
+            document.getElementById('public-btn').disabled = false;
+            document.getElementById('private-btn').disabled = false;
+            document.getElementById('user-btn').disabled = false;
+            
+            if (token && user) {
+                authSection.style.display = 'none';
+                userInfo.style.display = 'block';
+                userInfo.innerHTML = `<strong>Logged in as:</strong> ${user.login} (${user.name || 'No name'})`;
+                document.getElementById('logout-btn').disabled = false;
+            } else {
+                authSection.style.display = 'block';
+                userInfo.style.display = 'none';
+                document.getElementById('logout-btn').disabled = true;
+            }
+        }
+
+        function login() {
+            window.location.href = 'http://localhost:8081/auth/login';
+        }
+
+        function logout() {
+            localStorage.removeItem('token');
+            localStorage.removeItem('user');
+            token = null;
+            user = null;
+            updateUI();
+            document.getElementById('response').innerHTML = '';
+        }
+
+        async function makeRequest(endpoint, requiresAuth = false) {
+            const headers = { 'Content-Type': 'application/json' };
+            if (requiresAuth && token) {
+                headers['Authorization'] = `Bearer ${token}`;
+                console.log('Sending token:', token.substring(0, 20) + '...');
+            }
+
+            try {
+                const response = await fetch(`http://localhost:8080${endpoint}`, { headers });
+                const data = await response.json();
+                
+                document.getElementById('response').className = response.ok ? 'response success' : 'response error';
+                document.getElementById('response').textContent = JSON.stringify(data, null, 2);
+            } catch (error) {
+                document.getElementById('response').className = 'response error';
+                document.getElementById('response').textContent = `Error: ${error.message}`;
+            }
+        }
+
+        function callPublicAPI() {
+            makeRequest('/api/public');
+        }
+
+        function callPrivateAPI() {
+            makeRequest('/api/private', true);
+        }
+
+        function callUserAPI() {
+            makeRequest('/api/user', true);
+        }
+
+        // Handle OAuth callback
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('code')) {
+            handleCallback(urlParams.get('code'), urlParams.get('state'));
+        } else if (urlParams.get('token')) {
+            token = urlParams.get('token');
+            user = JSON.parse(decodeURIComponent(urlParams.get('user')));
+            localStorage.setItem('token', token);
+            localStorage.setItem('user', JSON.stringify(user));
+            window.history.replaceState({}, document.title, window.location.pathname);
+        }
+
+        async function handleCallback(code, state) {
+            try {
+                const response = await fetch('http://localhost:8081/auth/callback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code, state })
+                });
+                const data = await response.json();
+                
+                if (response.ok && data.token) {
+                    token = data.token;
+                    user = data.user;
+                    localStorage.setItem('token', token);
+                    localStorage.setItem('user', JSON.stringify(user));
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    updateUI();
+                } else {
+                    document.getElementById('response').className = 'response error';
+                    document.getElementById('response').textContent = 'Login failed: ' + (data.error || 'Unknown error');
+                }
+            } catch (error) {
+                document.getElementById('response').className = 'response error';
+                document.getElementById('response').textContent = 'Login error: ' + error.message;
+            }
+        }
+
+        updateUI();
+    </script>
+</body>
+</html>
