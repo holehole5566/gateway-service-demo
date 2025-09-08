@@ -53,14 +53,22 @@ func handlePrivate(w http.ResponseWriter, r *http.Request) {
 	
 	// Check for user headers added by gateway
 	userID := r.Header.Get("X-User-ID")
+	userIDStr := r.Header.Get("X-User-ID-Str")
 	userLogin := r.Header.Get("X-User-Login")
+	userEmail := r.Header.Get("X-User-Email")
 	
 	headers := make(map[string]interface{})
 	if userID != "" {
 		headers["X-User-ID"] = userID
 	}
+	if userIDStr != "" {
+		headers["X-User-ID-Str"] = userIDStr
+	}
 	if userLogin != "" {
 		headers["X-User-Login"] = userLogin
+	}
+	if userEmail != "" {
+		headers["X-User-Email"] = userEmail
 	}
 	
 	response := Response{
@@ -77,9 +85,11 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	
 	userID := r.Header.Get("X-User-ID")
+	userIDStr := r.Header.Get("X-User-ID-Str")
 	userLogin := r.Header.Get("X-User-Login")
+	userEmail := r.Header.Get("X-User-Email")
 	
-	if userID == "" || userLogin == "" {
+	if userLogin == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{
 			"error": "Missing user information in headers",
@@ -87,14 +97,22 @@ func handleUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	headers := map[string]interface{}{
+		"X-User-ID":    userID,
+		"X-User-Login": userLogin,
+	}
+	if userIDStr != "" {
+		headers["X-User-ID-Str"] = userIDStr
+	}
+	if userEmail != "" {
+		headers["X-User-Email"] = userEmail
+	}
+	
 	response := Response{
 		Message:   "User-specific data retrieved successfully",
 		Timestamp: time.Now().Format(time.RFC3339),
 		Service:   "demo-service",
-		Headers: map[string]interface{}{
-			"X-User-ID":    userID,
-			"X-User-Login": userLogin,
-		},
+		Headers:   headers,
 	}
 	
 	json.NewEncoder(w).Encode(response)

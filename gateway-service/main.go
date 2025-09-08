@@ -17,9 +17,11 @@ import (
 )
 
 type AuthResponse struct {
-	Valid  bool `json:"valid"`
-	UserID int  `json:"user_id"`
-	Login  string `json:"login"`
+	Valid     bool   `json:"valid"`
+	UserID    int    `json:"user_id"`
+	UserIDStr string `json:"user_id_str"`
+	Login     string `json:"login"`
+	Email     string `json:"email"`
 }
 
 type RateLimiter struct {
@@ -199,7 +201,9 @@ func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 	requiresAuth := path != "/public"
 	
 	var userID int
+	var userIDStr string
 	var userLogin string
+	var userEmail string
 	
 	if requiresAuth {
 		authResp, err := g.validateToken(r)
@@ -211,12 +215,14 @@ func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		
 		userID = authResp.UserID
+		userIDStr = authResp.UserIDStr
 		userLogin = authResp.Login
-		log.Printf("Authenticated user: %s (ID: %d)", userLogin, userID)
+		userEmail = authResp.Email
+		log.Printf("Authenticated user: %s (ID: %d, StrID: %s, Email: %s)", userLogin, userID, userIDStr, userEmail)
 	}
 
 	// Proxy request to demo service
-	g.proxyRequest(w, r, path, userID, userLogin)
+	g.proxyRequest(w, r, path, userID, userIDStr, userLogin, userEmail)
 }
 
 func (g *Gateway) validateHeaders(r *http.Request) error {
@@ -288,7 +294,7 @@ func min(a, b int) int {
 	return b
 }
 
-func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, path string, userID int, userLogin string) {
+func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, path string, userID int, userIDStr string, userLogin string, userEmail string) {
 	// Parse target URL
 	target, err := url.Parse(g.demoServiceURL)
 	if err != nil {
@@ -306,10 +312,16 @@ func (g *Gateway) proxyRequest(w http.ResponseWriter, r *http.Request, path stri
 		originalDirector(req)
 		req.URL.Path = path
 		
-		// Add user information as headers
-		if userID != 0 {
+		// Add user information as headers for authenticated users
+		if userLogin != "" {
 			req.Header.Set("X-User-ID", strconv.Itoa(userID))
+			if userIDStr != "" {
+				req.Header.Set("X-User-ID-Str", userIDStr)
+			}
 			req.Header.Set("X-User-Login", userLogin)
+			if userEmail != "" {
+				req.Header.Set("X-User-Email", userEmail)
+			}
 		}
 		
 		// Add gateway metadata

@@ -37,8 +37,10 @@ type LineUser struct {
 }
 
 type Claims struct {
-	UserID int    `json:"user_id"`
-	Login  string `json:"login"`
+	UserID    int    `json:"user_id"`
+	UserIDStr string `json:"user_id_str,omitempty"`
+	Login     string `json:"login"`
+	Email     string `json:"email"`
 	jwt.RegisteredClaims
 }
 
@@ -70,11 +72,11 @@ func main() {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		
+
 		if r.Method == "OPTIONS" {
 			return
 		}
-		
+
 		w.WriteHeader(http.StatusNotFound)
 	})
 
@@ -84,41 +86,41 @@ func main() {
 
 func handleGitHubLogin(w http.ResponseWriter, r *http.Request) {
 	state := generateState()
-	
+
 	params := url.Values{}
 	params.Add("client_id", githubClientID)
 	params.Add("redirect_uri", "http://localhost:8081/auth/callback/github")
 	params.Add("scope", "user:email")
 	params.Add("state", state)
-	
+
 	authURL := "https://github.com/login/oauth/authorize?" + params.Encode()
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
 func handleGoogleLogin(w http.ResponseWriter, r *http.Request) {
 	state := generateState()
-	
+
 	params := url.Values{}
 	params.Add("client_id", googleClientID)
 	params.Add("redirect_uri", "http://localhost:8081/auth/callback/google")
 	params.Add("scope", "openid email profile")
 	params.Add("response_type", "code")
 	params.Add("state", state)
-	
+
 	authURL := "https://accounts.google.com/o/oauth2/v2/auth?" + params.Encode()
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
 
 func handleLineLogin(w http.ResponseWriter, r *http.Request) {
 	state := generateState()
-	
+
 	params := url.Values{}
 	params.Add("response_type", "code")
 	params.Add("client_id", lineClientID)
 	params.Add("redirect_uri", "http://localhost:8081/auth/callback/line")
 	params.Add("state", state)
 	params.Add("scope", "profile openid email")
-	
+
 	authURL := "https://access.line.me/oauth2/v2.1/authorize?" + params.Encode()
 	http.Redirect(w, r, authURL, http.StatusTemporaryRedirect)
 }
@@ -134,14 +136,14 @@ func handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	req, _ := http.NewRequest("POST", "https://github.com/login/oauth/access_token", nil)
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	
+
 	data := url.Values{}
 	data.Set("client_id", githubClientID)
 	data.Set("client_secret", githubClientSecret)
 	data.Set("code", code)
 	req.Body = http.NoBody
 	req.URL.RawQuery = data.Encode()
-	
+
 	tokenResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		http.Error(w, "Failed to exchange code", http.StatusInternalServerError)
@@ -154,7 +156,7 @@ func handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to parse token response", http.StatusInternalServerError)
 		return
 	}
-	
+
 	accessToken, ok := tokenData["access_token"].(string)
 	if !ok {
 		log.Printf("Token response: %+v", tokenData)
@@ -165,7 +167,7 @@ func handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	// Get user info
 	userReq, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
 	userReq.Header.Set("Authorization", "Bearer "+accessToken)
-	
+
 	userResp, err := http.DefaultClient.Do(userReq)
 	if err != nil {
 		http.Error(w, "Failed to get user info", http.StatusInternalServerError)
@@ -180,6 +182,7 @@ func handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
 		UserID: user.ID,
 		Login:  user.Login,
+		Email:  user.Email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -194,9 +197,9 @@ func handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Redirect to frontend with token
 	userJSON, _ := json.Marshal(user)
-	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s", 
+	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s",
 		tokenString, url.QueryEscape(string(userJSON)))
-	
+
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
@@ -214,7 +217,7 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	data.Set("code", code)
 	data.Set("grant_type", "authorization_code")
 	data.Set("redirect_uri", "http://localhost:8081/auth/callback/google")
-	
+
 	tokenResp, err := http.PostForm("https://oauth2.googleapis.com/token", data)
 	if err != nil {
 		http.Error(w, "Failed to exchange code", http.StatusInternalServerError)
@@ -225,12 +228,6 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 	var tokenData map[string]interface{}
 	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenData); err != nil {
 		http.Error(w, "Failed to parse token response", http.StatusInternalServerError)
-		return
-	}
-	
-	accessToken, ok := tokenData["access_token"].(string)
-	if !ok {
-		http.Error(w, "No access token received", http.StatusInternalServerError)
 		return
 	}
 
@@ -254,13 +251,26 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var tokenPayload map[string]interface{}
+	json.Unmarshal(payload, &tokenPayload)
+
 	var user GoogleUser
-	json.Unmarshal(payload, &user)
+	if sub, ok := tokenPayload["sub"].(string); ok {
+		user.ID = sub
+	}
+	if name, ok := tokenPayload["name"].(string); ok {
+		user.Name = name
+	}
+	if email, ok := tokenPayload["email"].(string); ok {
+		user.Email = email
+	}
 
 	// Generate JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
-		UserID: 0, // Google uses string ID
-		Login:  user.Email,
+		UserID:    0,
+		UserIDStr: user.ID,
+		Login:     user.Email,
+		Email:     user.Email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -280,9 +290,9 @@ func handleGoogleCallback(w http.ResponseWriter, r *http.Request) {
 		"email": user.Email,
 	}
 	userJSON, _ := json.Marshal(userForFrontend)
-	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s", 
+	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s",
 		tokenString, url.QueryEscape(string(userJSON)))
-	
+
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
@@ -300,7 +310,7 @@ func handleLineCallback(w http.ResponseWriter, r *http.Request) {
 	data.Set("redirect_uri", "http://localhost:8081/auth/callback/line")
 	data.Set("client_id", lineClientID)
 	data.Set("client_secret", lineClientSecret)
-	
+
 	tokenResp, err := http.PostForm("https://api.line.me/oauth2/v2.1/token", data)
 	if err != nil {
 		http.Error(w, "Failed to exchange code", http.StatusInternalServerError)
@@ -311,12 +321,6 @@ func handleLineCallback(w http.ResponseWriter, r *http.Request) {
 	var tokenData map[string]interface{}
 	if err := json.NewDecoder(tokenResp.Body).Decode(&tokenData); err != nil {
 		http.Error(w, "Failed to parse token response", http.StatusInternalServerError)
-		return
-	}
-	
-	accessToken, ok := tokenData["access_token"].(string)
-	if !ok {
-		http.Error(w, "No access token received", http.StatusInternalServerError)
 		return
 	}
 
@@ -356,8 +360,10 @@ func handleLineCallback(w http.ResponseWriter, r *http.Request) {
 
 	// Generate JWT
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
-		UserID: 0, // Line uses string ID
-		Login:  user.DisplayName,
+		UserID:    0,
+		UserIDStr: user.UserID,
+		Login:     user.DisplayName,
+		Email:     user.Email,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -377,16 +383,16 @@ func handleLineCallback(w http.ResponseWriter, r *http.Request) {
 		"email": user.Email,
 	}
 	userJSON, _ := json.Marshal(userForFrontend)
-	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s", 
+	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s",
 		tokenString, url.QueryEscape(string(userJSON)))
-	
+
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
 func handleVerify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
-	
+
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -395,7 +401,7 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tokenString := authHeader[7:] // Remove "Bearer "
-	
+
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
 		return jwtSecret, nil
 	})
@@ -407,11 +413,18 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := token.Claims.(*Claims)
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"valid":   true,
-		"user_id": claims.UserID,
-		"login":   claims.Login,
-	})
+	response := map[string]interface{}{
+		"valid": true,
+		"login": claims.Login,
+		"email": claims.Email,
+	}
+	if claims.UserID != 0 {
+		response["user_id"] = claims.UserID
+	}
+	if claims.UserIDStr != "" {
+		response["user_id_str"] = claims.UserIDStr
+	}
+	json.NewEncoder(w).Encode(response)
 }
 
 func generateState() string {
