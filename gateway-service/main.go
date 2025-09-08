@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -21,9 +22,100 @@ type AuthResponse struct {
 	Login  string `json:"login"`
 }
 
+type RateLimiter struct {
+	mu       sync.RWMutex
+	requests map[string][]time.Time
+	limit    int
+	window   time.Duration
+}
+
 type Gateway struct {
 	authServiceURL  string
 	demoServiceURL  string
+	rateLimiter    *RateLimiter
+}
+
+func NewRateLimiter(limit int, window time.Duration) *RateLimiter {
+	return &RateLimiter{
+		requests: make(map[string][]time.Time),
+		limit:    limit,
+		window:   window,
+	}
+}
+
+func (rl *RateLimiter) Allow(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+	
+	// Get existing requests for this key
+	requests := rl.requests[key]
+	
+	// Remove old requests (sliding window)
+	var validRequests []time.Time
+	for _, req := range requests {
+		if req.After(cutoff) {
+			validRequests = append(validRequests, req)
+		}
+	}
+	
+	// Check if limit exceeded
+	if len(validRequests) >= rl.limit {
+		return false
+	}
+	
+	// Add current request
+	validRequests = append(validRequests, now)
+	rl.requests[key] = validRequests
+	
+	return true
+}
+
+func (rl *RateLimiter) GetRemaining(key string) int {
+	rl.mu.RLock()
+	defer rl.mu.RUnlock()
+	
+	now := time.Now()
+	cutoff := now.Add(-rl.window)
+	
+	requests := rl.requests[key]
+	var validCount int
+	for _, req := range requests {
+		if req.After(cutoff) {
+			validCount++
+		}
+	}
+	
+	return rl.limit - validCount
+}
+
+func (rl *RateLimiter) cleanup() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	
+	for range ticker.C {
+		rl.mu.Lock()
+		now := time.Now()
+		cutoff := now.Add(-rl.window)
+		
+		for key, requests := range rl.requests {
+			var validRequests []time.Time
+			for _, req := range requests {
+				if req.After(cutoff) {
+					validRequests = append(validRequests, req)
+				}
+			}
+			
+			if len(validRequests) == 0 {
+				delete(rl.requests, key)
+			} else {
+				rl.requests[key] = validRequests
+			}
+		}
+		rl.mu.Unlock()
+	}
 }
 
 func main() {
@@ -35,9 +127,13 @@ func main() {
 	gateway := &Gateway{
 		authServiceURL: getEnv("AUTH_SERVICE_URL", "http://localhost:8081"),
 		demoServiceURL: getEnv("DEMO_SERVICE_URL", "http://localhost:8082"),
+		rateLimiter:    NewRateLimiter(10, time.Minute), // 10 requests per minute
 	}
 
 	log.Printf("Config: AUTH_SERVICE_URL=%s, DEMO_SERVICE_URL=%s", gateway.authServiceURL, gateway.demoServiceURL)
+	
+	// Start cleanup routine
+	go gateway.rateLimiter.cleanup()
 
 	http.HandleFunc("/api/", gateway.handleAPI)
 	
@@ -70,6 +166,23 @@ func (g *Gateway) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	// Log incoming request
 	log.Printf("Gateway: %s %s from %s", r.Method, r.URL.Path, r.RemoteAddr)
+	
+	// Rate limiting
+	clientIP := strings.Split(r.RemoteAddr, ":")[0]
+	if !g.rateLimiter.Allow(clientIP) {
+		remaining := g.rateLimiter.GetRemaining(clientIP)
+		w.Header().Set("X-RateLimit-Limit", "10")
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Rate limit exceeded"})
+		return
+	}
+	
+	// Add rate limit headers
+	remaining := g.rateLimiter.GetRemaining(clientIP)
+	w.Header().Set("X-RateLimit-Limit", "10")
+	w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
 	
 	// Extract endpoint
 	path := strings.TrimPrefix(r.URL.Path, "/api")
