@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +12,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +40,16 @@ type LineUser struct {
 	Email       string `json:"email"`
 }
 
+type TelegramUser struct {
+	ID        int64  `json:"id"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+	Username  string `json:"username"`
+	PhotoURL  string `json:"photo_url"`
+	AuthDate  int64  `json:"auth_date"`
+	Hash      string `json:"hash"`
+}
+
 type Claims struct {
 	UserID    int    `json:"user_id"`
 	UserIDStr string `json:"user_id_str,omitempty"`
@@ -51,6 +65,7 @@ var (
 	googleClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
 	lineClientID       = os.Getenv("LINE_CLIENT_ID")
 	lineClientSecret   = os.Getenv("LINE_CLIENT_SECRET")
+	telegramBotToken   = os.Getenv("TELEGRAM_BOT_TOKEN")
 	jwtSecret          = []byte("demo-secret-key")
 )
 
@@ -65,6 +80,7 @@ func main() {
 	http.HandleFunc("/auth/callback/github", handleGitHubCallback)
 	http.HandleFunc("/auth/callback/google", handleGoogleCallback)
 	http.HandleFunc("/auth/callback/line", handleLineCallback)
+	http.HandleFunc("/auth/callback/telegram", handleTelegramCallback)
 	http.HandleFunc("/auth/verify", handleVerify)
 
 	// Enable CORS
@@ -389,6 +405,80 @@ func handleLineCallback(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
 }
 
+func handleTelegramCallback(w http.ResponseWriter, r *http.Request) {
+	// Parse query parameters from Telegram widget
+	query := r.URL.Query()
+	
+	user := TelegramUser{
+		Hash: query.Get("hash"),
+	}
+	
+	if id := query.Get("id"); id != "" {
+		if parsedID, err := strconv.ParseInt(id, 10, 64); err == nil {
+			user.ID = parsedID
+		}
+	}
+	if authDate := query.Get("auth_date"); authDate != "" {
+		if parsedDate, err := strconv.ParseInt(authDate, 10, 64); err == nil {
+			user.AuthDate = parsedDate
+		}
+	}
+	user.FirstName = query.Get("first_name")
+	user.LastName = query.Get("last_name")
+	user.Username = query.Get("username")
+	user.PhotoURL = query.Get("photo_url")
+	
+	// Verify Telegram hash
+	if !verifyTelegramHash(query, telegramBotToken) {
+		http.Error(w, "Invalid Telegram hash", http.StatusUnauthorized)
+		return
+	}
+	
+	if user.ID == 0 {
+		http.Error(w, "Invalid Telegram data", http.StatusBadRequest)
+		return
+	}
+	
+	// Create display name
+	displayName := user.FirstName
+	if user.LastName != "" {
+		displayName += " " + user.LastName
+	}
+	if displayName == "" && user.Username != "" {
+		displayName = user.Username
+	}
+	
+	// Generate JWT
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+		UserID:    0,
+		UserIDStr: strconv.FormatInt(user.ID, 10),
+		Login:     displayName,
+		Email:     "", // Telegram doesn't provide email
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	})
+	
+	tokenString, err := token.SignedString(jwtSecret)
+	if err != nil {
+		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+	
+	// Create user object for frontend
+	userForFrontend := map[string]interface{}{
+		"login": displayName,
+		"name":  displayName,
+		"id":    user.ID,
+	}
+	userJSON, _ := json.Marshal(userForFrontend)
+	redirectURL := fmt.Sprintf("http://localhost:3000?token=%s&user=%s",
+		tokenString, url.QueryEscape(string(userJSON)))
+	
+	http.Redirect(w, r, redirectURL, http.StatusTemporaryRedirect)
+}
+
 func handleVerify(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Content-Type", "application/json")
@@ -425,6 +515,37 @@ func handleVerify(w http.ResponseWriter, r *http.Request) {
 		response["user_id_str"] = claims.UserIDStr
 	}
 	json.NewEncoder(w).Encode(response)
+}
+
+func verifyTelegramHash(query url.Values, botToken string) bool {
+	hash := query.Get("hash")
+	if hash == "" {
+		return false
+	}
+	
+	// Create data string from all parameters except hash
+	var pairs []string
+	for key, values := range query {
+		if key != "hash" && len(values) > 0 {
+			pairs = append(pairs, key+"="+values[0])
+		}
+	}
+	
+	// Sort pairs alphabetically
+	sort.Strings(pairs)
+	dataCheckString := strings.Join(pairs, "\n")
+	
+	// Create secret key from bot token
+	h := sha256.New()
+	h.Write([]byte(botToken))
+	secretKey := h.Sum(nil)
+	
+	// Calculate HMAC-SHA256
+	mac := hmac.New(sha256.New, secretKey)
+	mac.Write([]byte(dataCheckString))
+	expectedHash := hex.EncodeToString(mac.Sum(nil))
+	
+	return hash == expectedHash
 }
 
 func generateState() string {
